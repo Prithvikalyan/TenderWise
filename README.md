@@ -10,34 +10,33 @@ submission from a single tender workspace.
 > checked against the original tender documents. It does not guarantee
 > eligibility, bid acceptance, or contract award.
 
-## Screenshots
 
-Add your screenshots to `docs/screenshots/` in the repository, then
-replace or rename the examples below to match the actual image files.
+## Application Screenshots
 
-  ------------------------------------------------------------------------------------------------
-  Dashboard                                    Tender workspace
-  -------------------------------------------- ---------------------------------------------------
-  ![TenderWise                                 ![Tender
-  dashboard](docs/screenshots/dashboard.png)   workspace](docs/screenshots/tender-workspace.png)
+### Dashboard
+![TenderWise Dashboard](docs/screenshots/01-dashboard.png)
 
-  ------------------------------------------------------------------------------------------------
+### Tender Workspace
+![Tender Workspace](docs/screenshots/02-tender-workspace.png)
 
-  ---------------------------------------------------------------------------------------------------
-  Company evidence matching                          Bid readiness
-  -------------------------------------------------- ------------------------------------------------
-  ![Company evidence                                 ![Bid
-  matching](docs/screenshots/company-evidence.png)   readiness](docs/screenshots/bid-readiness.png)
+### Tender Analysis
+![Tender Analysis](docs/screenshots/03-tender-analysis.png)
 
-  ---------------------------------------------------------------------------------------------------
+### Compliance Analysis
+![Compliance Analysis](docs/screenshots/04-compliance-analysis.png)
 
-  ----------------------------------------------------------------------------------------------
-  Tender Q&A                             Document processing
-  -------------------------------------- -------------------------------------------------------
-  ![Tender                               ![Document
-  Q&A](docs/screenshots/tender-qa.png)   processing](docs/screenshots/document-processing.png)
+### Company Document Management
+![Company Documents](docs/screenshots/05-company-documents.png)
 
-  ----------------------------------------------------------------------------------------------
+### Evidence Matching
+![Evidence Matching](docs/screenshots/06-evidence-matching.png)
+
+### Tender Q&A
+![Tender Q&A](docs/screenshots/07-tender-qa.png)
+
+### Reports and Milestones
+![Reports and Milestones](docs/screenshots/08-reports-milestones.png)
+
 
 If you use different filenames, update the Markdown image paths. GitHub
 displays the images once those files are committed.
