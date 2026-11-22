@@ -13,6 +13,7 @@ from typing import Iterator
 from uuid import UUID, uuid4
 
 from fastapi import UploadFile
+from botocore.config import Config as BotoConfig
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -61,8 +62,24 @@ def _exclusive_file_lock(path: Path) -> Iterator[bool]:
 
 
 class DocumentStorage:
-    def __init__(self, root: Path | None = None) -> None:
-        self.root = (root or get_settings().tenderwise_storage_dir).expanduser().resolve()
+    def __init__(self, root: Path | None = None, *, s3_client=None) -> None:
+        settings = get_settings()
+        self.root = (root or settings.tenderwise_storage_dir).expanduser().resolve()
+        self.is_remote = settings.tenderwise_storage_backend == "s3"
+        self.bucket = settings.neon_storage_bucket
+        self.s3 = None
+        if self.is_remote:
+            required = {
+                "NEON_STORAGE_BUCKET": self.bucket,
+                "AWS_ENDPOINT_URL_S3": settings.aws_endpoint_url_s3,
+                "AWS_REGION": settings.aws_region,
+                "AWS_ACCESS_KEY_ID": settings.aws_access_key_id,
+                "AWS_SECRET_ACCESS_KEY": settings.aws_secret_access_key,
+            }
+            missing = [name for name, value in required.items() if not value or not str(value).strip()]
+            if missing:
+                raise StorageError("Object storage configuration is incomplete: " + ", ".join(missing))
+            self.s3 = s3_client or self._create_s3_client(settings)
         self.root.mkdir(parents=True, exist_ok=True)
         self.staging = self.root / ".staging"
         self.quarantine = self.root / ".quarantine"
@@ -80,6 +97,24 @@ class DocumentStorage:
                 os.fsync(lock_file.fileno())
         self._active_journal_locks = {}
         self.cleanup_abandoned_source_stages()
+
+    @staticmethod
+    def _create_s3_client(settings):
+        """Create an S3-compatible client for Neon Object Storage."""
+        import boto3
+
+        return boto3.client(
+            "s3",
+            endpoint_url=settings.aws_endpoint_url_s3,
+            region_name=settings.aws_region,
+            aws_access_key_id=settings.aws_access_key_id,
+            aws_secret_access_key=settings.aws_secret_access_key,
+            config=BotoConfig(
+                signature_version="s3v4",
+                s3={"addressing_style": "path"},
+                retries={"max_attempts": 3, "mode": "standard"},
+            ),
+        )
 
     @staticmethod
     def _ensure_lock_file(path: Path) -> None:
@@ -144,6 +179,30 @@ class DocumentStorage:
             raise StorageError("Invalid storage reference")
         return candidate
 
+    def materialize(self, key: str) -> Path:
+        """Return a local path for a stored object, downloading it when remote."""
+        local_path = self.resolve_key(key)
+        if not self.is_remote:
+            return local_path
+        temporary = self.staging / f"read-{uuid4().hex}.part"
+        try:
+            self.s3.download_file(self.bucket, key, str(temporary))
+            os.chmod(temporary, 0o600)
+            return temporary
+        except Exception as exc:
+            temporary.unlink(missing_ok=True)
+            raise StorageError("Could not retrieve stored document") from exc
+
+    def cleanup_materialized(self, path: Path) -> None:
+        """Delete a temporary materialized copy after validation or response."""
+        try:
+            resolved = path.resolve()
+            if resolved.parent == self.staging.resolve() and resolved.name.startswith("read-"):
+                resolved.unlink(missing_ok=True)
+        except OSError:
+            # Temporary cleanup is best-effort; no source object is affected.
+            pass
+
     def stage(self, upload: UploadFile, maximum: int) -> tuple[Path, str, int, bytes]:
         path = self.staging / f"{uuid4().hex}.part"
         digest = hashlib.sha256()
@@ -172,6 +231,14 @@ class DocumentStorage:
 
     def promote(self, staged: Path, extension: str) -> str:
         key = f"{uuid4().hex}{extension}"
+        if self.is_remote:
+            try:
+                self.s3.upload_file(str(staged), self.bucket, key)
+            except Exception as exc:
+                raise StorageError("Could not store uploaded document") from exc
+            staged.unlink(missing_ok=True)
+            self._fsync_dir(self.staging)
+            return key
         destination = self.resolve_key(key)
         if destination.exists():
             raise StorageError("Storage collision")
@@ -193,12 +260,24 @@ class DocumentStorage:
             lease_lock = self._enter_file_lock(lease, wait=False)
             if lease_lock is None:
                 raise StorageError("Could not acquire source staging lease")
-            with source.open("rb") as input_file, staged.open("xb") as output:
-                os.chmod(staged, 0o600)
-                while chunk := input_file.read(CHUNK_SIZE):
-                    output.write(chunk)
-                output.flush()
-                os.fsync(output.fileno())
+            if self.is_remote:
+                try:
+                    self.s3.download_file(self.bucket, key, str(staged))
+                    os.chmod(staged, 0o600)
+                    # Open read/write before fsync. On Windows, fsync on a
+                    # read-only descriptor can fail with EINVAL even though
+                    # the S3 download completed successfully.
+                    with staged.open("r+b") as output:
+                        os.fsync(output.fileno())
+                except Exception as exc:
+                    raise StorageError("Could not retrieve document for processing") from exc
+            else:
+                with source.open("rb") as input_file, staged.open("xb") as output:
+                    os.chmod(staged, 0o600)
+                    while chunk := input_file.read(CHUNK_SIZE):
+                        output.write(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
             self._fsync_dir(self.staging)
             resolved = staged.resolve()
             self._active_source_locks[resolved] = lease_lock
@@ -261,6 +340,13 @@ class DocumentStorage:
             self._leave_staging_guard(guard)
 
     def remove(self, key: str) -> None:
+        self.resolve_key(key)
+        if self.is_remote:
+            try:
+                self.s3.delete_object(Bucket=self.bucket, Key=key)
+            except Exception as exc:
+                raise StorageError("Could not delete stored document") from exc
+            return
         self.resolve_key(key).unlink(missing_ok=True)
 
     @staticmethod
@@ -290,7 +376,9 @@ class DocumentStorage:
     def quarantine_documents(
         self, documents: list[tuple[UUID, UUID, str]]
     ) -> tuple[Path | None, list[tuple[Path, Path]]]:
-        """Journal all source intents before moving any file, then move each atomically."""
+        """Journal and atomically quarantine local sources before metadata deletion."""
+        if self.is_remote:
+            raise StorageError("Remote objects must be deleted after the database transaction commits")
         if not documents:
             return None, []
         if not self._acquire_journal_lock(wait=True):
@@ -386,7 +474,9 @@ class DocumentStorage:
             self._release_journal_lock()
 
     def recover_pending_deletions(self, session_factory) -> None:
-        """Reconcile journals with committed document rows; uncertainty leaves them intact."""
+        """Reconcile local journals with committed document rows."""
+        if self.is_remote:
+            return
         if not self._acquire_journal_lock(wait=False):
             return
         try:
