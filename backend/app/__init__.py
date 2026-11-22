@@ -1,0 +1,1 @@
+"""TenderWise backend application."""

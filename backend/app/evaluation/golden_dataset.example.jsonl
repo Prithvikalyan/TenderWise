@@ -1,0 +1,3 @@
+# Copy this file to golden_dataset.jsonl and add human-verified question/source pairs.
+# Do not use generated labels as ground truth. Use exact document names and source locations.
+# {"tender_id":"YOUR-TENDER-UUID","question":"What is the EMD amount?","relevant_sources":[{"document_name":"Tender_Notice.pdf","location":{"page":8}}]}
